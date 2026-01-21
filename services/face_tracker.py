@@ -1,5 +1,7 @@
 import cv2
 import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 import numpy as np
 
 
@@ -11,12 +13,32 @@ class FaceTracker:
         """
         Initializes the FaceTracker with a MediaPipe face detection model.
         """
-        self.mp_face_detection = mp.solutions.face_detection
-        # Use model_selection=0 (short-range) for better performance
-        # Increase min_detection_confidence to reduce false positives
-        self.face_detection = self.mp_face_detection.FaceDetection(
-            model_selection=0, min_detection_confidence=0.5
+        import os
+        import urllib.request
+        from pathlib import Path
+        
+        # Download face detection model if not present
+        model_dir = Path.home() / '.mediapipe' / 'models'
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / 'blaze_face_short_range.tflite'
+        
+        if not model_path.exists():
+            print("📥 Downloading face detection model (one-time setup)...")
+            model_url = 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'
+            try:
+                urllib.request.urlretrieve(model_url, model_path)
+                print("✅ Model downloaded successfully")
+            except Exception as e:
+                print(f"⚠️ Failed to download model: {e}")
+                raise
+        
+        # Create FaceDetector using the new MediaPipe Tasks API
+        base_options = python.BaseOptions(model_asset_path=str(model_path))
+        options = vision.FaceDetectorOptions(
+            base_options=base_options,
+            min_detection_confidence=0.5
         )
+        self.face_detector = vision.FaceDetector.create_from_options(options)
         # Cache for detected faces to avoid reprocessing
         self.face_cache = {}
         print("🎯 Initialized intelligent face tracking with MediaPipe (optimized)")
@@ -45,20 +67,28 @@ class FaceTracker:
             
             # Convert to RGB (required by MediaPipe)
             rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-            results = self.face_detection.process(rgb_frame)
+            
+            # Create MediaPipe Image
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            
+            # Detect faces using the new API
+            detection_result = self.face_detector.detect(mp_image)
 
             faces = []
-            if results.detections:
-                for detection in results.detections:
-                    bbox = detection.location_data.relative_bounding_box
-                    x = int(bbox.xmin * w)  # Scale back to original size
-                    y = int(bbox.ymin * h)
-                    width = int(bbox.width * w)
-                    height = int(bbox.height * h)
+            if detection_result.detections:
+                for detection in detection_result.detections:
+                    bbox = detection.bounding_box
+                    # Convert normalized coordinates to pixel coordinates
+                    x = int(bbox.origin_x / scale)  # Scale back to original size
+                    y = int(bbox.origin_y / scale)
+                    width = int(bbox.width / scale)
+                    height = int(bbox.height / scale)
 
                     center_x = x + width // 2
                     center_y = y + height // 2
-                    confidence = detection.score[0]
+                    
+                    # Get confidence score from first category
+                    confidence = detection.categories[0].score if detection.categories else 0.5
 
                     faces.append({
                         'center_x': center_x,
@@ -186,8 +216,8 @@ class FaceTracker:
         # Clear cache to free memory
         self.face_cache = {}
         
-        # Use faster cropping with resize_algorithm='fast_bilinear' for better performance
-        cropped_clip = clip.crop(x1=left, width=target_width, resize_algorithm='fast_bilinear')
+        # Use faster cropping for better performance
+        cropped_clip = clip.crop(x1=left, width=target_width)
         print(f"    ✅ Video cropping complete: {target_width}x{height}")
         return cropped_clip
 
@@ -197,7 +227,7 @@ class FaceTracker:
             # Clear cache to free memory
             self.face_cache = {}
             # Close the face detection model
-            self.face_detection.close()
+            self.face_detector.close()
             print("🎯 Face tracking resources released")
         except Exception as e:
             print(f"⚠️ Error closing face tracker: {e}")
